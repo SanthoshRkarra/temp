@@ -1,0 +1,36 @@
+data bookmarks(keep = titles site page);
+infile "E:\clinstat_dev\XX5\103\Final\esub\bimo\xx445-*.rtf" lrecl = 32767 truncover end = eof;
+length titles site $2000;
+retain prx1 firstpage;
+if _n_ = 1 then prx1 = prxparse("/Page\s\d+\sof\s\d+/i");
+
+do while(not eof);
+   input;
+   if prxmatch(prx1, _infile_) then page + 1;
+   if index(_infile_, '\outlinelevel0\s999') then do;
+      titles = substr(_infile_, index(_infile_, '\outlinelevel0\s999'));
+      titles = substr(titles, index(titles, '{') + 1);
+      titles = compbl(tranwrd(substr(titles, 1, length(titles) - 1), '{\line}', ' '));
+      firstpage = 1;
+   end;
+   if firstpage and index(_infile_, '{Site:') then do;
+      site = substr(_infile_, index(_infile_, '{Site:') + 1);
+      site = substr(site, 1, length(site) - 1);
+      output;
+      firstpage = 0;
+   end;
+end;
+run;
+
+proc sort data = bookmarks;
+by site page;
+run;
+
+data _null_;
+set bookmarks;
+by site page;
+file 'bookmarks.txt';
+if _n_ = 1 then put 'VX17-445-103' '09'x '1';
+if first.site then put '09'x site +(-1) '09'x page;
+put '0909'x titles +(-1) '09'x page;
+run;
