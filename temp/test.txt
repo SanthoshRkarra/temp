@@ -1,4 +1,4 @@
-/* Data step to extract bookmarks */
+/* Data step to extract bookmarks using INDEX functions for debugging */
 data bookmarks(keep = titles site page);
     infile "E:\clinstat_dev\XX5\103\Final\esub\bimo\xx445-*.rtf" 
            lrecl=32767 
@@ -6,36 +6,13 @@ data bookmarks(keep = titles site page);
            end=eof;
 
     /* Define lengths for character variables */
-    length titles site temp_listing part_subject site_number $2000;
+    length titles site $2000;
 
     /* Retain variables across iterations */
-    retain prx_page prx_site prx_title page site temp_listing;
-
-    /* Compile regular expressions on the first iteration */
-    if _n_ = 1 then do;
-        /* Regex to match page indicator: sb10\sa10\qc\f1\fs20\cf1{\cell} */
-        prx_page = prxparse('/sb10\\sa10\\qc\\f1\\fs20\\cf1\\{\\\\cell\\}/i');
-
-        /* 
-           Regex to match site and subject:
-           sb10\sa10\qc\f1\fs20\cf1{Subjects who were consent - Site 1001\cell}
-           Captures:
-             - Group 1: Subjects who were consent
-             - Group 2: Site number (e.g., 1001)
-        */
-        prx_site = prxparse('/sb10\\sa10\\qc\\f1\\fs20\\cf1\\{([^\\}]+) - Site\s+(\d+)\\cell\\}/i');
-
-        /* 
-           Regex to match listing titles:
-           sb10\sa10\qc\f1\fs20\cf1{Listing 1001_a\cell}
-           Captures:
-             - Group 1: Listing identifier (e.g., 1001_a)
-        */
-        prx_title = prxparse('/sb10\\sa10\\qc\\f1\\fs20\\cf1\\{Listing\s+([^\\}]+)\\cell\\}/i');
-    end;
+    retain page temp_listing;
 
     /* Initialize page number */
-    page = 0;
+    if _n_ = 1 then page = 0;
 
     /* Loop through each line of the RTF files */
     do while(not eof);
@@ -45,69 +22,48 @@ data bookmarks(keep = titles site page);
            1. Identify page number by matching the page indicator pattern.
            Each match increments the page count.
         */
-        if prxmatch(prx_page, _infile_) then page + 1;
-
-        /* 
-           2. Identify listing titles by matching the listing pattern.
-           Store the listing identifier for later combination with the subject.
-        */
-        if prxmatch(prx_title, _infile_) then do;
-            temp_listing = prxposn(prx_title, 1, _infile_);
+        if index(_infile_, '\sb10\sa10\qc\f1\fs20\cf1{\cell}') then do;
+            page + 1;
+            /* For debugging: Uncomment the next line to see page increments */
+            /* put "Page detected: " page= _infile_; */
         end;
 
         /* 
-           3. Identify site and subject by matching the site pattern.
-           Extract the subject and site number, then combine with the listing.
+           2. Identify listing titles by checking if the line contains 'Listing'
         */
-        if prxmatch(prx_site, _infile_) then do;
-            /* Extract captured groups */
-            part_subject = prxposn(prx_site, 1, _infile_); /* e.g., "Subjects who were consent" */
-            site_number  = prxposn(prx_site, 2, _infile_); /* e.g., "1001" */
+        if index(_infile_, 'Listing') > 0 then do;
+            /* Extract the content within braces */
+            start = index(_infile_, '{') + 1;
+            end = index(_infile_, '\cell}');
+            if end > start then do;
+                temp_listing = substr(_infile_, start, end - start);
+                /* For debugging: Uncomment the next line to see listings */
+                /* put "Listing detected: " temp_listing=; */
+            end;
+        end;
 
-            /* Construct the site name */
-            site = cats('Site ', site_number);
-
-            /* 
-               Combine the listing and subject to form the full title.
-               For example: "Listing 1001_a Subjects who were consent"
-            */
-            if temp_listing ne '' then do;
-                titles = cats(temp_listing, ' ', part_subject);
-                output;
-                /* Reset temp_listing for the next title */
-                temp_listing = '';
+        /* 
+           3. Identify site and subject by checking if the line contains 'Subjects who were consent - Site'
+        */
+        if index(_infile_, 'Subjects who were consent - Site') > 0 then do;
+            /* Extract the content within braces */
+            start = index(_infile_, '{') + 1;
+            end = index(_infile_, '\cell}');
+            if end > start then do;
+                full_subject = substr(_infile_, start, end - start);
+                /* Extract site number */
+                site_start = index(full_subject, 'Site') + 5; /* 'Site ' is 5 characters */
+                site_number = substr(full_subject, site_start);
+                site = cats('Site ', site_number);
+                
+                /* Combine listing and subject to form the full title */
+                if temp_listing ne '' then do;
+                    titles = cats(temp_listing, ' ', 'Subjects who were consent');
+                    output;
+                    /* For debugging: Uncomment the next line to see output records */
+                    /* put "Output record: " titles= site= page=; */
+                end;
             end;
         end;
     end;
-run;
-
-/* Sort the bookmarks dataset by site and page */
-proc sort data=bookmarks;
-    by site page;
-run;
-
-/* Write the bookmarks to a tab-delimited text file */
-data _null_;
-    set bookmarks;
-    by site page;
-    /* Specify the output file path */
-    file 'E:\clinstat_dev\XX5\103\Final\esub\bimo\bookmarks.txt' dlm='09'x;
-
-    /* 
-       1. Write the header line only once at the beginning.
-       Format: XX17-445-103<TAB>1
-    */
-    if _n_ = 1 then put 'XX17-445-103' '09'x '1';
-
-    /* 
-       2. Write the site line when encountering the first record of a new site.
-       Format: <TAB>Site 1001<TAB>1
-    */
-    if first.site then put '09'x site '09'x page;
-
-    /* 
-       3. Write the title line for each listing under the site.
-       Format: <TAB><TAB>Listing 1001_a Subjects who were consent<TAB>1
-    */
-    put '09'x '09'x titles '09'x page;
 run;
