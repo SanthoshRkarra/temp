@@ -1,1 +1,84 @@
 
+%include "..\..\..\standard.sas";  
+%macro findpath; 
+    %global env; 
+    %if %sysfunc(fileexist(..\..\..\dev)) %then %let env = dev; 
+    %else %if %sysfunc(fileexist(..\..\..\prod)) %then %let env = prod;;
+%mend findpath;
+ 
+%findpath;
+
+%put _global_;
+
+%let inpath=..\..\..\&env\listings;
+%let outpath =..\..\..\esub_prep\program\bimo;
+options mprint mlogic symbolgen;
+%macro m_combrtf(text=,inpath= ,outpath= ,outfile= );
+proc datasets lib=work kill nolist memtype = data;
+quit;
+
+data rtffiles(keep=fileloc fnm);
+length fref $8 fnm $80 fileloc $400;
+
+rc = filename(fref, "&inpath");
+if rc = 0 then did = dopen(fref);
+
+dnum = dnum(did);
+
+do i = 1 to dnum;
+fnm = dread(did, i);
+fid = mopen(did, fnm);
+if fid > 0 and index(fnm,'rtf') then do;
+fileloc="&inpath/"||left(trim(fnm));
+fnm = strip(tranwrd(fnm,".rtf",""));
+output;
+end;
+end;
+rc = dclose(did);
+run;
+
+*Sort rtf files by tfl number;
+data listings(keep= fileloc ord filename);
+length filename $200 ;
+set rtffiles;
+ord=compress(fnm,'','kd');
+
+filename = strip(tranwrd(fnm,".rtf",""));
+if not missing(ord) and index(upcase(filename),"&text.") and index(upcase(filename),"-I")=0;
+run;
+
+proc sort data = listings; by ord filename; run;
+
+data _null_ ;
+   retain EndOfFile 0;
+   set listings end = lastfile;
+   
+   infile filename lrecl = 32767 truncover end = eof filevar = fileloc;
+   file "&outpath/&outfile..rtf" lrecl=32767 nopad;
+
+   do while(not eof);
+      input;
+
+      * Remove the bracket at the end of the file for all but the last file;
+      if not lastfile and _infile_ in('\pard}', '{\par}}') then do;
+         _infile_ = substr(_infile_, 1, length(_infile_) - 1);
+         EndOfFile = 1;
+         put _infile_;
+      end;
+      else if EndOfFile then do;
+         if _infile_ =: '\sectd' then do;
+            _infile_ = tranwrd(_infile_,'\sectd','\sect\sectd');
+            put _infile_;
+            EndOfFile = 0;
+         end;
+      end;
+      else put _infile_;
+   end;
+run;
+%mend m_combrtf;
+
+%m_combrtf(text=L-LB-CHEM,inpath = &inpath,outpath = &outpath,outfile = l-lb-chem);
+%m_combrtf(text=L-LB-HEMA,inpath = &inpath,outpath = &outpath,outfile = l-lb-hema);
+
+%m_combrtf(text=L-QS-CFQR,inpath = &inpath,outpath = &outpath,outfile = l-qs-cfqr);
+%m_combrtf(text=L-SP,inpath = &inpath,outpath = &outpath,outfile = l-sp);
