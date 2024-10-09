@@ -1,0 +1,143 @@
+%macro m_combined_rtf(prefix=,
+                      inpath = ,
+                      outpath = ,
+                      levelotext = ,
+                      outbookmark = ,
+                      outrtf = );
+
+proc datasets library = work kill noprint; run; quit;
+/*rtf combine*/
+data rtffiles(keep=fileloc fnm);
+    length fref $8 fnm $80 fileloc $400;
+    rc = filename(fref, "&inpath");
+    if rc = 0 then did = dopen(fref);
+    dnum = dnum(did);
+
+    do i = 1 to dnum;
+        fnm = dread(did, i);
+        fid = mopen(did, fnm);
+        if fid > 0 and index(fnm,'.rtf') then do;
+            fileloc="&inpath/"||left(trim(fnm));
+            fnm = strip(tranwrd(fnm, ".rtf", ""));
+            output;
+        end;
+    end;
+    rc = dclose(did);
+run;
+
+/*Sort rtf files by tf1 number*/
+data listings(keep=fileloc filename);
+    set rtffiles;
+    length filename $200;
+    ord=compress(fnm, '','kd');
+    filename = strip(tranwrd(fnm, ".rtf", ""));
+    if not missing(ord) and index(upcase(filename), "&prefix.");
+run;
+
+proc sort data = listings; by ord filename; run;
+
+data _null_;
+    retain EndOfFile 0;
+    set listings end = lastfile;
+    infile filename lrecl = 32767 truncover end = eof filevar = fileloc;
+    file "&outpath./&outrtf.rtf" lrecl=32767 nopad;
+
+    do while(not eof);
+        /* File processing loop here */
+    end;
+do while(not eof);
+    input;
+    /* Remove the bracket at the end of the file for all but the last file; */
+    if not lastfile and _infile_ in ('{par}', '{\par}') then do;
+        _infile_ = substr(_infile_, 1, length(_infile_) - 1);
+        EndOfFile = 1;
+        put _infile_;
+        end;
+    else if EndOfFile then do;
+        if _infile_ = '{sect}' then do;
+            put _infile_ = '{\sect}{\sect}';
+            _infile_;
+            EndOfFile = 0;
+        end;
+    end;
+    else put _infile_;
+end;
+
+run;
+
+proc datasets library = work kill noprint; run; quit;
+/*Bookmarks*/
+%let outpath = ;
+%let outfmt = &gels_combined;
+%let outbookmark = tables_bookmark;
+%let outtable 13.2.2.6.6
+/412
+/*;
+data bookmarks\a;
+    infile "&outpath.\&outfmt.rtf"
+    lrecl=32767
+    truncover
+    end=eof;
+do while(not eof);
+    input;
+    length Header $200 text $32746;
+    retain Header ;
+    if index(_infile_, '{\rtf1\ansi\ansicpg1252\uc1\deff0\deftab1033\deflang1033') then Header = '';
+    if index(_infile_, '{\header\pard\plain\qc') then Header = 'Y';
+    if index(_infile_, '{\footer\pard\plain\qc') then Header = 'N';
+    text = _infile_;
+    output;
+end;
+run;
+
+data bookmarks1;
+    set bookmark $20;
+    length title $200;
+    retain page ;
+    if index(text, "\pard\plain\intbl\b\slb\sa10\qc\f1\fs20\cf1\cell") then page = page+1;
+    if text = "\pard\plain\intbl\slb\sa10\qc\f1\fs20\cf1\cell" and missing(title) then
+        title = substr(text, index(text, '{') + 1);
+    title = strip(compl(trim(tranwrd(title, '\cell',''))));
+    counter = _n_;
+run;
+
+data bookmarks2;
+    set bookmarks1;
+    if index(text, "\sl10\qc\f1\fs20\cf1") and Header = 'Y';
+run;
+
+data bookmarks3;
+    length titles $2000; retain titles ;
+    set bookmarks2;
+    by page counter;
+    if first.page then titles = strip(title); else titles = strip(titles) || " " || strip(title);
+    if last.page;
+    titles = strip(titles);
+    proc sort; by titles page;
+run;
+
+data bookmarks4 (keep = titles page);
+    set bookmarks3;
+    by titles page;
+    if first.titles;
+run;
+
+data _null_;
+    set bookmarks4;
+    by page;
+    file "&outpath./&outbookmark.txt";
+    if _n_ = 1 then put '\BEDI55.P1 SAI Tables' @9 'x '1';
+    if _n_ = 1 then put '&levelotext.' @9 'x '1';
+    put @9 'x titles +(-1) @9 'x page';
+run;
+
+%mend m_combined_rtf;
+
+%let inpath = %str(G:\bpsapp\bps\workspace\UPL\ZIN\P31\primary\Output\tier1\tables\packing\Subset\input);
+%let outpath = ;
+%m_combined_rtf(prefix=T_,
+                inpath = &inpath,
+                outpath = &outpath,
+                levelotext = %str(VIBED551.P3.S1 Tables),
+                outbookmark = tables_bookmark,
+                outrtf = tables_combined);
