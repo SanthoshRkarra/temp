@@ -1,1 +1,552 @@
 
+/****************************************************************************
+*
+* PROJECT : Global Macros
+*
+* MACRO NAME : m_tfl_rtfcombine.sas
+*
+* DESCRIPTION : Combines multiple RTF files into one or more bundled RTF file(s). Files can be selected by either using a file naming pattern,
+*               by selecting them from a SAS data set containing the file names or by defining a table number pattern.
+*               The macro will optionally create a TOC at the top of the file and a spreadsheet can optionally be created listing the files in each bundle.
+*
+* MACRO CALLS : m_tfl_rtfsetup
+*               m_tfl_rtfclose
+*
+* INPUT : TFLs in RTF format created using the m_tfl_rtfsetup and m_tfl_rtfclose macros
+*         Optionally a SAS data set containing the file names to be used to create the bundle(s) e.g. tfl.titlfoot
+*
+* OUTPUT : Bundled RTF file(s) containing the specified files and optionally a table of contents
+*          Optionally an Excel spreadsheet with a list of the files used to create each of the bundled data sets
+*
+*----------------------------------------------------------------------------
+* USAGE NOTES 
+* See User Guide
+*----------------------------------------------------------------------------
+*
+*----------------------------------------------------------------------------
+* ASSUMPTIONS:
+* The macro only works with RTF files created using the m_tfl_rtfsetup and m_tfl_rtfclose macros
+*----------------------------------------------------------------------------
+*
+*----------------------------------------------------------------------------
+* REVISION HISTORY:
+*
+* DATE      PROGRAMMER      DESCRIPTION
+* 11JUL2017 SK    Initial Version
+* 05OCT2017 SK    Added tblnum parameter to subset by table numbers
+*                           Allow pipe-delimited list of folders for rtfpath
+*                           Allow option of outputting list of tables to Excel
+* 14NOV2017 SK    Add procreport = Y option in rtfsetup call so proc report statement generated when creating TOC for figures
+* 12JAN2018 SK    Changed file names to use dashes rather than underscores
+*                           Corrected bug with Excel file when CreateTOC and ExcelFile are specified
+* 16JAN2018 SK    Put tables at top of file followed by figures rather than sort by table number
+* 11MAY2018 SK    Update table number parsing algorithm to handle adhoc TFLs
+* 18JUN2018 SK    Corrected log message appearing when CreateTOC = N
+* 24SEP2018 SK    Added quotes around folder paths to address issue with folder names containing spaces
+* 25JAN2019 SK    For Excel file, convert RTF control characters to Excel unicode characters
+*----------------------------------------------------------------------------
+* USAGE EXAMPLE:
+*
+* See user guide for examples
+*----------------------------------------------------------------------------
+*
+* PARAMETER DESCRIPTIONS:
+*
+* TFFILE
+* Description: The SAS data set containing the title and footnote information
+* Options: A SAS data set containing at least the variables 
+* Default: tfl.titlfoot
+* Required: No
+*            
+* TFWHERE
+* Description: A where clause that can be used on the data set specified in tffile
+* Options: A valid SQL where clause that can be applied to the data set used in the TFFILE parameter
+* Required: No
+*            
+* RTFPATH
+* Description: The path of the folder where the RTF files reside
+* Options: The path of an existing folder. Can be an absolute path or relative to the program folder
+* Default: The current folder
+* Required: No
+*
+* RTFFILES
+* Description: The RTF files to be included (may include wild cards such as *) e.g. t-*-dmc. Should not include .rtf
+* Required: No
+*
+* TBLNUM
+* Description: A pipe-delimited list of table number. A separate bundle will be created for each delimited value. Only table numbers beginning with the value supplied will be output.
+*              Each output file name will be suffixed with the table number using dashes instead of dots.
+* Required: No
+*
+* RTFSUFFIX
+* Description: The suffix of the file names to be included e.g. -open
+* Required: No
+*
+* OUTFILE
+* Description: The fully-qualified path of the combined RTF file that the macro will create
+* Default: all_(type)(rtfsuffix).rtf where (type) is based on the folder the program is being run from e.g. tables and (rtfsuffix) is the parameter value
+* Required: No
+*
+* CREATETOC
+* Description: If Y, a table of contents will be created before the combined RTF files
+* Options: Y or N
+* Default: N
+* Required: No
+*
+* EXCELFILE
+* Description: The path of the Excel file that will be outputted containing a list of all of the TFLs in the combined RTF file
+* Required: No
+*
+* EXCELSHEET
+* Description: The sheet in the Excel file that will contain the list of all of the TFLs in the combined RTF file
+*              If the TBLNUM parameter is specified, a separate sheet will be created for each delimited value and named using the name specified in this parameter
+*              with suffix of the delimited value from TBLNUM with the dots converted to dashes
+* Required: No
+*
+* EXCELTITLE
+* Description: The title that will appear in the Excel report. When TBLNUM is specified the title will be suffixed with the delimited value with the dots converted to dashes
+* Required: No
+*
+* DEBUG
+* Description: If Y is specified, it will keep the work data sets created by the macro. Otherwise, they will be deleted
+* Options: Y or N
+* Default: N
+* Required: No
+*
+****************************************************************************/
+
+%macro m_tfl_rtfcombine(tffile     = tfl.titlfoot,
+                        tfwhere    = ,
+                        rtfpath    = ,
+                        rtffiles   = ,
+                        tblnum     = ,
+                        rtfsuffix  = ,
+                        outfile    = ,
+                        createtoc  = N,
+                        excelfile  = ,
+                        excelsheet = ,
+                        exceltitle = ,
+                        debug      = N
+                       );
+
+%local i j prefix err rtfpattern dsid val rc m_prefix rtfpath_count tblnum_count rtfpattern_count;
+%let prefix = rtfcombine;
+
+%* Parameter Checks;
+%* tffile;
+%if %nrbquote(&tffile) ne %then %do;
+   %if not %sysfunc(exist(&tffile)) %then %do;
+      %put ERR%str(O)R(&sysmacroname): Title/footnote data set specified in tffile (&tffile) does not exist.;
+      %let err = 1;
+   %end;
+%end;
+%if %nrbquote(&err) ne %then %goto ErrExit;;
+
+%* tfwhere;
+%* If tffile is missing and tfwhere is not then terminate;
+%if %nrbquote(&tffile) = %str() and %nrbquote(&tfwhere) ne %then %do;
+   %if not %sysfunc(exist(&tfwhere)) %then %do;
+      %put ERR%str(O)R(&sysmacroname): The tffile parameter is missing but there is a value for tfwhere.;
+      %let err = 1;
+   %end;
+%end;
+%if %nrbquote(&err) ne %then %goto ErrExit;;
+
+%* Check whether any files exist with the where clause from tfwhere in tffile;
+%if %nrbquote(&tffile) ne %str() and %nrbquote(&tfwhere) ne %then %do;
+   proc sql noprint;
+   validate
+   select *
+   from &tffile
+   where &tfwhere
+   ;
+   quit;
+   %if &syserr ne 0 %then %do;
+      %put ERR%str(O)R(&sysmacroname): The where clause specified (&tfwhere) is not valid.;
+      %let err = 1;
+      %goto ErrExit;
+   %end;
+   proc sql noprint;
+   select count(*)
+   into :tfcount
+   from &tffile
+   where &tfwhere
+   ;
+   quit;
+   %if &tfcount = 0 %then %do;
+      %put ERR%str(O)R(&sysmacroname): No records were found for the specified where clause (&tfwhere).;
+      %let err = 1;
+   %end;
+%end;
+
+%* Check for existence of outputnm variable in tffile;
+%if %nrbquote(&tffile) ne %then %do;
+   %let dsid = %sysfunc(open(&tffile));
+   %let val  = %sysfunc(varnum(&dsid, outputnm));
+   %let rc   = %sysfunc(close(&dsid));
+   %if &val = 0 %then %do;
+      %put ERR%str(O)R(&sysmacroname): Variable outputnm does not exist in data set &tffile..;
+      %let err = 1;
+      %goto ErrExit;
+   %end;
+%end;
+%if %nrbquote(&err) ne %then %goto ErrExit;;
+
+%* rtfpath;
+%* Split rtfpath into multiple macro variables, using pipe as a delimiter and check for the existence of the folders;
+%if %nrbquote(&rtfpath) ne %then %do;
+   %let rtfpath_count = %sysfunc(countw(%nrbquote(&rtfpath), |));
+   %do i = 1 %to &rtfpath_count;
+      %local rtfpath&i;
+      %let rtfpath&i = %scan(&rtfpath, &i, |);
+      %if not %sysfunc(fileexist(&&rtfpath&i)) %then %do;
+         %put ERR%str(O)R(&sysmacroname): Folder specified in rtfpath (&&rtfpath&i) does not exist.;
+         %let err = 1;
+      %end;
+   %end;
+%end;
+%else %do;
+   %let rtfpath_count = 1;
+   %local rtfpath1;
+   %let rtfpath1 = .;
+%end;
+%if %nrbquote(&err) ne %then %goto ErrExit;;
+
+%* rtffiles;
+%* Split rtffiles into multiple macro variables, using pipe as a delimiter;
+%if %nrbquote(&rtffiles) = %then %do;
+   %let rtfpattern_count = 1;
+   %local rtfpattern1;
+   %let rtfpattern1 = *&rtfsuffix;
+%end;
+%else %do;
+   %let rtfpattern_count = %sysfunc(countw(&rtffiles, |));
+   %do i = 1 %to &rtfpattern_count;
+      %local rtfpattern&i;
+      %let rtfpattern&i = %scan(&rtffiles, &i, |)&rtfsuffix;
+   %end;
+%end;
+
+%* tblnum;
+%* Split tblnum into multiple macro variables using pipe as a delimiter;
+%if %nrbquote(&tblnum) ne %then %do;
+   %let tblnum_count = %sysfunc(countw(&tblnum, |));
+   %do i = 1 %to &tblnum_count;
+      %local tblnum&i tblnum_&i tblnumd&i;
+      %let tblnum&i = %scan(&tblnum, &i, |);
+      %let tblnum_&i = %sysfunc(tranwrd(&&tblnum&i, ., _));
+      %let tblnumd&i = %sysfunc(tranwrd(&&tblnum&i, ., -));
+   %end;
+%end;
+%else %do;
+   %let tblnum_count = 1;
+   %local tblnum1;
+   %let tblnum1 =;
+%end;
+
+%* rtfsuffix;
+
+%* createtoc;
+%let createtoc = %upcase(%substr(&createtoc, 1, 1));
+%if &createtoc ne Y and &createtoc ne N %then %do;
+   %put ERR%str(O)R(&sysmacroname): createtoc must be either Y or N.;
+   %let err = 1;
+%end;
+
+%* ExcelFile;
+
+%* ExcelSheet;
+%* If ExcelFile is non-missing then either ExcelSheet of TblNum should be non-missing;
+%if %nrbquote(&ExcelFile) ne and %nrbquote(&ExcelSheet) = and %nrbquote(&tblnum) = %then %do;
+   %put ERR%str(O)R(&sysmacroname): IF ExcelFile is specified, either ExcelSheet or TblNum must be non-missing.;
+   %let err = 1;
+%end;
+
+%* ExcelTitle;
+
+%* OutFile;
+%* Set to all_tables (with suffix) by default if run from a tables folder, all_listings or all_figures if run from listings/figures folder;
+%if %nrbquote(&outfile) = %then %do;
+   %if %nrbquote(&rtfsuffix) ne %then %let outfile = all_%lowcase(%scan(%nrbquote(&mypath), -2, \/))&rtfsuffix..rtf;
+   %else %let outfile = all_%lowcase(%scan(%nrbquote(&mypath), -2, \/)).rtf;;
+%end;
+
+%* debug;
+%let debug = %upcase(%substr(&debug, 1, 1));
+%if &debug ne Y and &debug ne N %then %do;
+   %put ERR%str(O)R(&sysmacroname): Debug must be either Y or N.;
+   %let err = 1;
+%end;
+%if %nrbquote(&err) ne %then %goto ErrExit;;
+
+%if %nrbquote(&rtfpath) = %then %do;
+   %let rtfpath_count = 1;
+   %let rtfpath1 = .;
+   %do j = 1 %to &rtfpattern_count;
+      filename rtf1&j pipe "dir "".\&&rtfpattern&j...rtf"" /A-D /B";
+   %end;
+%end;
+%else %do;
+   %do i = 1 %to &rtfpath_count;
+      %do j = 1 %to &rtfpattern_count;
+         filename rtf&i&j pipe "dir ""&&rtfpath&i\&&rtfpattern&j...rtf"" /A-D /B";
+      %end;
+   %end;
+%end;
+%do i = 1 %to &rtfpath_count;
+   %do j = 1 %to &rtfpattern_count;
+      data &prefix._rtffiles&i&j(drop = n);
+      length rtffile $500 file $200;
+      infile rtf&i&j end = eof;
+      input;
+      %* Exclude in-text tables;
+      if not index(lowcase(_infile_), '-i.rtf') then do;
+         file     = lowcase(_infile_);
+         rtffile  = "&&rtfpath&i\" || lowcase(_infile_);
+         output;  
+         n + 1;
+      end;
+      run;
+   %end;
+   %do j = 1 %to &rtfpattern_count;
+      filename rtf&i&j clear;
+   %end;
+%end;
+
+%do i = 1 %to &tblnum_count;
+   data &prefix._rtffiles(drop = n);
+   set %do j = 1 %to &rtfpath_count; %do k = 1 %to &rtfpattern_count; &prefix._rtffiles&j&k %end; %end; end = eof;
+   n + 1;
+   if eof then call symput('nfiles', strip(put(n, 8.)));
+   run;
+
+   %if %nrbquote(&tffile) ne %then %do;
+      data &prefix._tffiles(keep = outputnm1 file rename = (outputnm1 = rtffile));
+      set &tffile%if %nrbquote(&tfwhere) ne %then (where = (&tfwhere));;
+      length outputnm1 $500;
+      %if %nrbquote(&rtfsuffix) ne %then outputnm = strip(outputnm) || "&rtfsuffix";;
+      outputnm = strip(lowcase(outputnm)) || '.rtf';
+      count = 0;
+      %do j = 1 %to &rtfpath_count;
+         if fileexist("&&rtfpath&j" || '\' || outputnm) then do;
+            count + 1;
+            if count >= 2 then do;
+               putlog "ERR%str(OR)(&sysmacroname): Output file " outputnm "appears in more than one folder: " outputnm1 "and &&rtfpath&j";
+               call symput('err', '1');
+            end;
+            else do;
+               outputnm1 = lowcase("&&rtfpath&j" || '\' || outputnm);
+               file = outputnm;
+            end;
+         end;
+      %end;
+      if count = 1 then output;
+      run;
+      %if %nrbquote(&err) ne %then %goto ErrExit;;
+
+      proc sort data = &prefix._tffiles nodup;
+      by file rtffile;
+      run;
+
+      proc sort data = &prefix._rtffiles;
+      by file;
+      run;
+
+      data &prefix._rtffiles;
+      merge &prefix._rtffiles(in = a) &prefix._tffiles(in = b rename = (rtffile = rtffile_tf));
+      by file;
+      if a and not b then putlog "NOTE(&sysmacroname): " rtffile "found in folder but not in &tffile";
+      else if b and not a then putlog "NOTE(&sysmacroname): " rtffile_tf "found in &tffile but not present in folder";
+      else if a and b then output;
+      run;
+   %end;
+
+   data &prefix._titles&i(keep = filename filetype rtffile_temp titles tblno n: c: rename =(rtffile_temp = rtffile));
+   set &prefix._rtffiles end = lastfile;
+   length titles $2000 c1 - c10 $20 filename $500 filetype $20 tblno $200;
+   retain prx1;
+   format n1 - n10 8.;
+   infile filename lrecl = 32767 truncover end = eof filevar = rtffile;
+   array tblnum  {10} n1 - n10;
+   array tblchar {10} c1 - c10;
+   if _n_ = 1 then prx1 = prxparse("/^((AD\sHOC|ADHOC)\s)?(TABLE|LISTING|FIGURE|APPENDIX)( [\w\.]+|.*\])/i");
+   rtffile_temp = rtffile;
+   filename = transtrn(lowcase(scan(rtffile, -1, '\')), '.rtf', trimn(''));
+   if filename =: 't-' then filetype = 'Table';
+   else if filename =: 'l-' then filetype = 'Listing';
+   else if filename =: 'f-' then filetype = 'Figure';
+
+   do while(not eof);
+      input;
+      if index(_infile_, '\outlinelevel0\s999') then do;
+         titles = substr(_infile_, index(_infile_, '\outlinelevel0\s999'));
+         titles = substr(titles, index(titles, '{') + 1);
+         titles = compbl(tranwrd(substr(titles, 1, length(titles) - 1), '{\line}', ' '));
+         if prxmatch(prx1, strip(titles)) then do;
+            tblno = strip(upcase(prxposn(prx1, 4, titles)));
+            do i = 1 to countw(tblno, '.');
+               tblchar(i) = scan(tblno, i, '.');
+               %* If table number contains levels with a mixture of numbers and letters e.g. 2b, use the numeric part for the numeric variable;
+               if notdigit(tblchar(i)) ne 1 then tblnum(i)  = input(substr(tblchar(i), 1, notdigit(tblchar(i)) - 1), ??8.);
+            end;
+         end;
+         %if %nrbquote(&&tblnum&i) ne %then %do; if tblno = :"&&tblnum&i" then %end; output;
+      end;
+   end;
+   run;
+
+   proc sort data = &prefix._titles&i;
+   by descending filetype %do j = 1 %to 10; n&j c&j %end;;
+   run;
+
+   %if %nrbquote(&createtoc) = Y %then %do;
+      data &prefix._titles&i._1;
+      set &prefix._titles&i;
+      length titles_bm $2000;
+      %* Add links to bookmarks on first title line of each TFL;
+      titles_bm = '{\field {\*\fldinst HYPERLINK \\l "\~BM_log' || trim(left(put(_n_, 8.))) || '"}{\fldrslt ' || trim(left(titles)) || '}}';
+      run;
+
+      %let m_prefix = &prefix;
+
+      %m_tfl_rtfsetup(data       = &m_prefix._titles&i._1,
+                      rtfpath    = %sysfunc(getoption(work)),
+                      tffile     = ,
+                      rtffile    = toc.rtf,
+                      procreport = Y
+                     );
+      title1 j = c "Table of Contents";
+      footnote1 " ";
+      column titles_bm;
+
+      define titles_bm /  display '~' style(column)= [just= l protectspecialchars=off cellwidth= 98%];
+      run;
+
+      %m_tfl_rtfclose;
+
+      %let prefix = &m_prefix;
+
+      %* Add TOC file before list of TFLs;
+      data &prefix._titles&i(drop = orig_rtffile);
+      set &prefix._titles&i;
+      retain fileno 0;
+      if _n_ = 1 then do;
+         orig_rtffile = rtffile;
+         rtffile      = "%sysfunc(getoption(work))\toc.rtf";
+         output;
+         rtffile = orig_rtffile;
+      end;
+      fileno + 1;
+      output;
+      run;
+   %end;
+
+   %* Combine RTF files;
+   data _null_ ;
+   retain endoffile toc_footnote 0;
+   set &prefix._titles&i end = lastfile;
+
+   infile filename lrecl = 32767 truncover end = eof filevar = rtffile;
+   %if %nrbquote(&&tblnum&i) ne %then file "%bquote(&outfile.-&&tblnumd&i...rtf)" lrecl = 32767;
+   %else file "%bquote(&outfile)" lrecl = 32767;;
+
+   do while(not eof);
+      input;
+
+      %if %nrbquote(&createtoc) = Y %then %do;
+         if fileno = 0 and index(_infile_, '{\footer') then toc_footnote = 1;
+         else if fileno = 0 and _infile_ =: '\pard\plain\s' then toc_footnote = 0;
+         %* Add bookmarks. The s999 style is used by the RTF macros to identify the titles on page 1;
+         if index(_infile_, 's999{') then do;
+            _infile_ = tranwrd(_infile_, 's999{', 's999{{\*\bkmkstart\~BM_log' || strip(put(fileno, 8.)) || '}');
+            _infile_ = substr(_infile_, 1, length(_infile_) - 1) || '{\*\bkmkend BM_log' || strip(put(fileno, 8.)) || '}}';
+         end;
+      %end;
+      * Remove the bracket at the end of the file for all but the last file;
+      if not lastfile and _infile_ in('\pard}', '{\par}}') then do;
+         _infile_ = substr(_infile_, 1, length(_infile_) - 1);
+         endoffile = 1;
+         put _infile_;
+      end;
+      else if endoffile then do;
+         if _infile_ =: '\sectd' then do;
+            _infile_ = tranwrd(_infile_,'\sectd','\sect\sectd');
+            put _infile_;
+            endoffile = 0;
+         end;
+      end;
+      else if not toc_footnote then put _infile_;
+   end;
+   run;
+%end;
+
+%* Create Excel file with a summary of all of the tables in the bundles;
+%if %nrbquote(&ExcelFile) ne %then %do;
+   ods listing close ;
+   ods tagsets.excelxp  file = "&ExcelFile" style = statistical;
+
+   %do i = 1 %to &tblnum_count;
+      data &prefix._titles_specchar&i;
+      set &prefix._titles&i;
+      %* Convert RTF subscripts and superscripts to format needed for Excel;
+      titles = prxchange('s/\\sub (\w*)\\nosupersub\{\}/(*ESC*){sub $1}/', -1, titles);
+      titles = prxchange('s/\\super (\w*)\\nosupersub\{\}/(*ESC*){super $1}/', -1, titles);
+      %* Convert other RTF special characters to format needed for Excel: RTF uses decimal value, Excel hexadecimal;
+      do while(prxmatch('/\\uc1\\u(\d{4})\\~/', titles));
+         titles = substr(titles, 1, prxmatch('/\\uc1\\u(\d{4})\\~/', titles) -1) ||
+                  '(*ESC*){unicode ' ||
+                  put(input(substr(titles, prxmatch('/\\uc1\\u(\d{4})\\~/', titles) + 6, 4), 4.), hex4.) || '}' ||
+                  substr(titles, prxmatch('/\\uc1\\u(\d{4})\\~/', titles) + 12);
+      end;
+      run;
+
+      ods tagsets.excelxp options (autofilter            = 'yes'
+                                   row_repeat            = 'header'
+                                   orientation           = 'landscape'
+                                   fittopage             = 'yes'
+                                   pages_fitwidth        = '1'
+                                   pages_fitheight       = '100'
+                                   absolute_column_width = '8,11,24,80'
+                                   embedded_titles       = 'yes'
+                                   embedded_footnotes    = 'off'
+                                   autofit_height        = 'yes'
+                                   %if %nrbquote(&&tblnum&i) ne %then sheet_name = "&ExcelSheet.-&&tblnumd&i";
+                                   %else sheet_name = "&ExcelSheet";
+                                   skip_space            = '0,0,0,0,0'
+                                   gridlines             = 'yes'
+                                   auto_subtotals        = 'off'
+                                  );
+
+      proc report data = &prefix._titles_specchar&i%if %nrbquote(&createtoc) = Y %then (where = (fileno ne 0)); center nowindows headline headskip spacing = 1 split = '~' missing
+                  style(header) = {background = lightyellow font_weight = bold foreground = black} ;
+      column filetype tblno filename titles;
+
+      define filetype / order order=data left flow 'Type' width=10;
+      define tblno    / display left flow 'Number' width=15;
+      define filename / display left flow 'Program Name' width=25;
+      define titles   / display left flow 'Description' width=45;
+
+      break after filetype / skip;
+
+      %if %nrbquote(&&tblnum&i) ne %then title1 "&ExcelTitle.&&tblnumd&i...rtf";
+      %else title1 "&ExcelTitle";;
+
+      footnote ' ';
+      run;
+   %end;
+
+   ods tagsets.excelxp close;
+   ods listing;
+%end;
+
+
+%ErrExit:
+%if &err = 1 %then %PUT ERR%str(O)R(&sysmacroname): Macro terminating.;;
+%* Clean Up;
+%if &debug ne Y %then %do;
+    proc datasets lib = work mt = data nolist nowarn;
+      delete &prefix._:;
+    quit;
+%end;
+
+%mend m_tfl_rtfcombine;
